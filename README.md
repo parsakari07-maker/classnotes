@@ -1,11 +1,124 @@
-<div align="center">
+# کلاس‌نوت (ClassNotes) - سامانه جامع کتابخانه دیجیتال کلاس
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+یک وب‌اپلیکیشن فول‌استک و مدرن به زبان فارسی و راست‌چین (RTL) که به عنوان مخزن مرکزی جزوه‌ها، تخته‌های هوشمند، اطلاعیه‌ها و تقویم امتحانات کلاس عمل می‌کند.
 
-  <h1>Built with AI Studio</h2>
+---
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+## ۱. زیرساخت نهایی سامانه (Final Infrastructure Architecture)
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+این سامانه بر اساس معماری نهایی زیر مستقر می‌شود:
 
-</div>
+```text
+                         GitHub
+                    Source + Git
+                         │
+                         │ Deploy
+                         ▼
+              ┌─────────────────────┐
+              │ Cloudflare Workers  │
+              │                     │
+              │ API / Backend       │
+              │ Auth                │
+              │ Business Logic      │
+              └─────────┬───────────┘
+                        │
+                 ┌──────┴──────┐
+                 ▼             ▼
+          ┌────────────┐  ┌──────────────┐
+          │    Neon    │  │ Cloudflare   │
+          │ PostgreSQL │  │     R2       │
+          │            │  │              │
+          │ Metadata   │  │ PDFs         │
+          │ Users      │  │ Images       │
+          │ Subjects   │  │ Attachments  │
+          │ Exams      │  │              │
+          │ Announce.  │  │              │
+          └────────────┘  └──────────────┘
+```
+
+### اصول کلیدی زیرساخت:
+1. **GitHub**:
+   - برای کد منبع، کنترل نسخه، شاخه‌ها و CI/CD.
+   - **فایل‌های آموزشی بزرگ (PDF و تصویر) هرگز در مخزن گیت قرار نمی‌گیرند.**
+2. **Cloudflare Workers**:
+   - وب‌سرویس و API، احراز هویت، جستجو، شمارش دانلودها، منطق تجاری و مدیریت فرآیندهای دو مرحله‌ای.
+   - **قانون حیاتی کارایی (Critical Performance Rule)**: فایل‌های حجیم پی‌دی‌اف و عکس هرگز از ورکر پروکسی نمی‌شوند (`User → Worker → R2 → Worker → User` ممنوع است) و مستقیماً توسط R2 تحویل داده می‌شوند (`User → R2 → PDF/Image`).
+3. **Cloudflare R2**:
+   - ذخیره‌سازی شیء (Object Storage) برای تمام جزوه‌های PDF، تصاویر تخته کلاس و ضمایم امتحانی، بدون هزینه پهنای باند خروجی (Zero Egress Fees).
+4. **Neon PostgreSQL**:
+   - پایگاه داده رابطه‌ای برای ساختارها، متادیتا، دسته‌بندی‌ها، کاربران مدیر، اطلاعیه‌ها و تقویم امتحانات.
+   - هیچ فایل باینری درون ردیف‌های پایگاه داده متنی ذخیره نمی‌شود.
+
+---
+
+## ۲. ساختار جداول پایگاه داده در Neon PostgreSQL
+
+فایل مایگریشن در مسیر `migrations/0001_initial_schema.sql` شامل جداول زیر است:
+- **`subjects`**: شناسه‌ها، نام درس، رنگ سازمانی، نامک یکتا (Slug)، آیکون و ترتیب نمایش.
+- **`files`**: جدول مشترک جزوه‌ها و تصاویر، شامل مسیر در R2 (`storage_path`)، حجم، نوع، تعداد صفحات و شمارنده دانلود.
+- **`announcements`**: اطلاعیه‌های کلاسی با اولویت‌بندی، تاریخ انقضا و وضعیت سنجاق در بالای سایت.
+- **`exams`**: تقویم آزمون‌ها با تاریخ، ساعت، سرفصل‌ها و نام دبیر.
+- **`admin_users`**: کاربر مدیر با الزام به تغییر رمز عبور پس از اولین ورود.
+- **`site_settings`** و **`audit_logs`**: گزارش رویدادها و پیکربندی کلاس.
+
+---
+
+## ۳. چرخه حیات فایل و امنیت داده‌ها (Transactional Consistency)
+
+1. **آپلود ایمن**:
+   - احراز هویت مدیر → اعتبارسنجی بایت‌های جادویی (Magic Bytes) و پسوند → آپلود در R2 → ثبت متادیتا در Neon.
+   - در صورت بروز هرگونه خطا در ثبت پایگاه داده، فایل باینری بلافاصله از R2 حذف می‌شود تا فایل یتیم (Orphan) باقی نماند.
+2. **جایگزینی ایمن (Safe Replacement)**:
+   - ابتدا فایل جدید در R2 ذخیره و راستی‌آزمایی می‌شود؛ سپس رکورد Neon به‌روزرسانی می‌شود؛ و تنها پس از اطمینان کامل، فایل قدیمی از R2 پاکسازی می‌گردد.
+3. **حذف دائم (Safe Deletion)**:
+   - حذف کامل فایل از R2 و سطر متناظر در Neon با بازگرداندن گزارش دقیق موفقیت یا خطا.
+4. **اسکنر فایل‌های یتیم (Orphan Scanner)**:
+   - مقایسه کلیدهای موجود در باکت R2 با رکوردهای ثبت‌شده در Neon و فراهم کردن امکان پاکسازی با یک کلیک در پنل مدیریت.
+
+---
+
+## ۴. دسترسی و ورود مدیر
+
+- آدرس ورود: `/admin` (یا دکمه «پنل دبیر» در هدر سایت)
+- نام کاربری اولیه: `admin`
+- رمز عبور اولیه: `ClassNotes@1405!`
+- **الزام به تغییر رمز عبور**: به محض اولین ورود موفق، صفحه تغییر رمز اجباری نمایش داده شده و تا ثبت رمز جدید، دسترسی به پنل مسدود است.
+
+---
+
+## ۵. تنظیم متغیرهای محیطی (`.env`)
+
+```ini
+# اتصال به Neon PostgreSQL
+DATABASE_URL="postgres://username:password@ep-sample-project-123456.us-east-2.aws.neon.tech/neondb?sslmode=require"
+
+# مشخصات Cloudflare R2
+R2_ACCOUNT_ID="your_cloudflare_account_id"
+R2_ACCESS_KEY_ID="your_r2_access_key_id"
+R2_SECRET_ACCESS_KEY="your_r2_secret_access_key"
+R2_BUCKET_NAME="classnotes-storage"
+R2_PUBLIC_URL="https://pub-classnotes.r2.dev"
+
+# کلید رمزنگاری جلسات
+AUTH_SECRET="your_long_random_jwt_secret_token"
+```
+
+---
+
+## ۶. راه‌اندازی و استقرار
+
+### اجرای محیط توسعه محلی:
+```bash
+npm install
+npm run dev
+```
+
+### اجرای مایگریشن روی Neon:
+```bash
+psql $DATABASE_URL -f migrations/0001_initial_schema.sql
+```
+
+### استقرار روی Cloudflare Workers:
+```bash
+npx wrangler deploy
+```

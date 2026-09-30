@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "classnotes-worker",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [
+    {
+      "binding": "NOTES_BUCKET",
+      "bucket_name": "classnotes-storage",
+      "preview_bucket_name": "classnotes-storage-preview"
+    }
+  ],
+  "vars": {
+    "R2_PUBLIC_URL": "https://pub-classnotes.r2.dev",
+    "APP_ENV": "production"
+  }
+}
